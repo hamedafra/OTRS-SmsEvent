@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<otrs_config version="1.0" init="Application">
+    <ConfigItem Name="SmsEvent::Gateway###Kannel" Required="0" Valid="1">
+        <Description Translatable="1">Kannel SMS Gateway</Description>
+        <Group>SmsEvent</Group>
+        <SubGroup>SmsEvent::Gateways</SubGroup>
+        <Setting>
+            <Hash>
+                <Item Key="user"></Item>
+                <Item Key="password"></Item>
+                <Item Key="SenderID"></Item>
+                <Item Key="URL"></Item>
+                <Item Key="Name">Kannel HTTP Gateway</Item>
+                <Item Key="Module">Kernel::System::Sms::Gateways::Kannel</Item>
+                <Item Key="Encoding">utf8</Item>
+            </Hash>
+        </Setting>
+    </ConfigItem>
+
+</otrs_config>
