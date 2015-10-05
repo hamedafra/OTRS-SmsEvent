@@ -1,8 +1,6 @@
 # --
-# Kernel/Modules/AdminSmsEvent.pm - to manage event-based smss
-# Copyright (C) 2001-2012 OTRS AG, http://otrs.org/
-# --
-# $Id: AdminSmsEvent.pm,v 1.43 2012/11/20 14:39:44 mh Exp $
+# Kernel/Modules/AdminSmsEvent.pm - to manage event-based notifications
+# Copyright (C) 2001-2015 OTRS AG, http://otrs.com/
 # --
 # This software comes with ABSOLUTELY NO WARRANTY. For details, see
 # the enclosed file COPYING for license information (AGPL). If you
@@ -16,6 +14,7 @@ use warnings;
 
 use Kernel::System::SmsEvent;
 use Kernel::System::Priority;
+use Kernel::System::Event;
 use Kernel::System::Lock;
 use Kernel::System::Service;
 use Kernel::System::SLA;
@@ -25,9 +24,6 @@ use Kernel::System::Valid;
 use Kernel::System::DynamicField;
 use Kernel::System::DynamicField::Backend;
 use Kernel::System::VariableCheck qw(:all);
-
-use vars qw($VERSION);
-$VERSION = qw($Revision: 1.43 $) [1];
 
 sub new {
     my ( $Type, %Param ) = @_;
@@ -55,10 +51,22 @@ sub new {
     $Self->{DynamicFieldObject} = Kernel::System::DynamicField->new(%Param);
     $Self->{BackendObject}      = Kernel::System::DynamicField::Backend->new(%Param);
 
+    $Self->{Config} = $Self->{ConfigObject}->Get("Frontend::Admin::$Self->{Action}");
+
+    $Self->{RichText} = $Self->{ConfigObject}->Get('Frontend::RichText');
+    if ( $Self->{RichText} && !$Self->{Config}->{RichText} ) {
+        $Self->{RichText} = 0;
+    }
+
     # get the dynamic fields for this screen
     $Self->{DynamicField} = $Self->{DynamicFieldObject}->DynamicFieldListGet(
         Valid      => 1,
         ObjectType => ['Ticket'],
+    );
+
+    $Self->{EventObject} = Kernel::System::Event->new(
+        %Param,
+        DynamicFieldObject => $Self->{DynamicFieldObject},
     );
 
     return $Self;
@@ -66,6 +74,12 @@ sub new {
 
 sub Run {
     my ( $Self, %Param ) = @_;
+
+    # set type for notifications
+    my $NotificationType = 'text/plain';
+    if ( $Self->{RichText} ) {
+        $NotificationType = 'text/html';
+    }
 
     # ------------------------------------------------------------ #
     # change
@@ -98,19 +112,23 @@ sub Run {
         $Self->{LayoutObject}->ChallengeTokenCheck();
 
         my %GetParam;
-        for my $Parameter (qw(ID Name Subject Body Type Charset Comment ValidID Events)) {
+        for my $Parameter (
+            qw(ID Name Subject Body Type Charset Comment ValidID Events ArticleSubjectMatch ArticleBodyMatch ArticleTypeID ArticleSenderTypeID)
+            )
+        {
             $GetParam{$Parameter} = $Self->{ParamObject}->GetParam( Param => $Parameter ) || '';
         }
+        PARAMETER:
         for my $Parameter (
             qw(Recipients RecipientAgents RecipientGroups RecipientRoles RecipientEmail
             Events StateID QueueID PriorityID LockID TypeID ServiceID SLAID
             CustomerID CustomerUserID
             ArticleTypeID ArticleSubjectMatch ArticleBodyMatch Gateway
-            ArticleSenderTypeID SmsArticleTypeID)
+            ArticleSenderTypeID NotificationArticleTypeID)
             )
         {
             my @Data = $Self->{ParamObject}->GetArray( Param => $Parameter );
-            next if !@Data;
+            next PARAMETER if !@Data;
             $GetParam{Data}->{$Parameter} = \@Data;
         }
 
@@ -131,7 +149,7 @@ sub Run {
                 LayoutObject           => $Self->{LayoutObject},
             );
 
-            # set the comple value structure in GetParam to store it later in the Sms Item
+            # set the comple value structure in GetParam to store it later in the Notification Item
             if ( IsHashRefWithData($DynamicFieldValue) ) {
 
                 # set search structure for display
@@ -150,12 +168,37 @@ sub Run {
         }
 
         # update
-        my $Ok = $Self->{SmsEventObject}->SmsUpdate(
-            %GetParam,
-            Charset => $Self->{LayoutObject}->{UserCharset},
-            Type    => 'text/plain',
-            UserID  => $Self->{UserID},
-        );
+        my $Ok;
+        my $ArticleFilterMissing;
+
+        # checking if article filter exist if necessary
+        if (
+            grep { $_ eq 'ArticleCreate' || $_ eq 'ArticleSend' }
+            @{ $GetParam{Data}->{Events} || [] }
+            )
+        {
+            if (
+                !$GetParam{ArticleTypeID}
+                && !$GetParam{ArticleSenderTypeID}
+                && $GetParam{ArticleSubjectMatch} eq ''
+                && $GetParam{ArticleBodyMatch} eq ''
+                )
+            {
+                $ArticleFilterMissing = 1;
+            }
+        }
+
+        # required Article filter only on ArticleCreate and ArticleSend event
+        # if isn't selected at least one of the article filter fields, notification isn't updated
+        if ( !$ArticleFilterMissing ) {
+            $Ok = $Self->{SmsEventObject}->SmsUpdate(
+                %GetParam,
+                Charset => $Self->{LayoutObject}->{UserCharset},
+                Type    => $NotificationType,
+                UserID  => $Self->{UserID},
+            );
+        }
+
         if ($Ok) {
             $Self->_Overview();
             my $Output = $Self->{LayoutObject}->Header();
@@ -176,6 +219,20 @@ sub Run {
                     $GetParam{ $Needed . "ServerError" } = "ServerError";
                 }
             }
+
+            # define ServerError Class atribute if necessary
+            $GetParam{ArticleTypeIDServerError}       = "";
+            $GetParam{ArticleSenderTypeIDServerError} = "";
+            $GetParam{ArticleSubjectMatchServerError} = "";
+            $GetParam{ArticleBodyMatchServerError}    = "";
+
+            if ( $ArticleFilterMissing == 1 ) {
+                $GetParam{ArticleTypeIDServerError}       = "ServerError";
+                $GetParam{ArticleSenderTypeIDServerError} = "ServerError";
+                $GetParam{ArticleSubjectMatchServerError} = "ServerError";
+                $GetParam{ArticleBodyMatchServerError}    = "ServerError";
+            }
+
             my $Output = $Self->{LayoutObject}->Header();
             $Output .= $Self->{LayoutObject}->NavigationBar();
             $Output .= $Self->{LayoutObject}->Notify( Priority => 'Error' );
@@ -222,18 +279,22 @@ sub Run {
         $Self->{LayoutObject}->ChallengeTokenCheck();
 
         my %GetParam;
-        for my $Parameter (qw(Name Subject Body Comment ValidID Events)) {
+        for my $Parameter (
+            qw(Name Subject Body Comment ValidID Events ArticleSubjectMatch ArticleBodyMatch ArticleTypeID ArticleSenderTypeID)
+            )
+        {
             $GetParam{$Parameter} = $Self->{ParamObject}->GetParam( Param => $Parameter ) || '';
         }
+        PARAMETER:
         for my $Parameter (
             qw(Recipients RecipientAgents RecipientRoles RecipientGroups RecipientEmail Events StateID QueueID
             PriorityID LockID TypeID ServiceID SLAID CustomerID CustomerUserID
             ArticleTypeID ArticleSubjectMatch ArticleBodyMatch Gateway
-            ArticleSenderTypeID SmsArticleTypeID)
+            ArticleSenderTypeID NotificationArticleTypeID)
             )
         {
             my @Data = $Self->{ParamObject}->GetArray( Param => $Parameter );
-            next if !@Data;
+            next PARAMETER if !@Data;
             $GetParam{Data}->{$Parameter} = \@Data;
         }
 
@@ -273,12 +334,36 @@ sub Run {
         }
 
         # add
-        my $ID = $Self->{SmsEventObject}->SmsAdd(
-            %GetParam,
-            Charset => $Self->{LayoutObject}->{UserCharset},
-            Type    => 'text/plain',
-            UserID  => $Self->{UserID},
-        );
+        my $ID;
+        my $ArticleFilterMissing;
+
+        # define ServerError Message if necessary
+        if (
+            grep { $_ eq 'ArticleCreate' || $_ eq 'ArticleSend' }
+            @{ $GetParam{Data}->{Events} || [] }
+            )
+        {
+            if (
+                !$GetParam{ArticleTypeID}
+                && !$GetParam{ArticleSenderTypeID}
+                && $GetParam{ArticleSubjectMatch} eq ''
+                && $GetParam{ArticleBodyMatch} eq ''
+                )
+            {
+                $ArticleFilterMissing = 1;
+            }
+        }
+
+        # required Article filter only on ArticleCreate and Article Send event
+        # if isn't selected at least one of the article filter fields, notification isn't added
+        if ( !$ArticleFilterMissing ) {
+            $ID = $Self->{SmsEventObject}->SmsAdd(
+                %GetParam,
+                Charset => $Self->{LayoutObject}->{UserCharset},
+                Type    => $NotificationType,
+                UserID  => $Self->{UserID},
+            );
+        }
 
         if ($ID) {
             $Self->_Overview();
@@ -300,6 +385,21 @@ sub Run {
                     $GetParam{ $Needed . "ServerError" } = "ServerError";
                 }
             }
+
+            # checking if article filter exist if necessary
+            $GetParam{ArticleTypeIDServerError}       = "";
+            $GetParam{ArticleSenderTypeIDServerError} = "";
+            $GetParam{ArticleSubjectMatchServerError} = "";
+            $GetParam{ArticleBodyMatchServerError}    = "";
+
+            if ( $ArticleFilterMissing == 1 )
+            {
+                $GetParam{ArticleTypeIDServerError}       = "ServerError";
+                $GetParam{ArticleSenderTypeIDServerError} = "ServerError";
+                $GetParam{ArticleSubjectMatchServerError} = "ServerError";
+                $GetParam{ArticleBodyMatchServerError}    = "ServerError";
+            }
+
             my $Output = $Self->{LayoutObject}->Header();
             $Output .= $Self->{LayoutObject}->NavigationBar();
             $Output .= $Self->{LayoutObject}->Notify( Priority => 'Error' );
@@ -371,6 +471,12 @@ sub _Edit {
     $Self->{LayoutObject}->Block( Name => 'ActionList' );
     $Self->{LayoutObject}->Block( Name => 'ActionOverview' );
 
+    # get list type
+    my $TreeView = 0;
+    if ( $Self->{ConfigObject}->Get('Ticket::Frontend::ListType') eq 'tree' ) {
+        $TreeView = 1;
+    }
+
     $Param{RecipientsStrg} = $Self->{LayoutObject}->BuildSelection(
         Data => {
             AgentOwner            => 'Agent (Owner)',
@@ -396,16 +502,16 @@ sub _Edit {
         SelectedID => $Param{Data}->{RecipientAgents},
     );
     $Param{RecipientGroupsStrg} = $Self->{LayoutObject}->BuildSelection(
-        Data => { $Self->{GroupObject}->GroupList( Valid => 1 ) },
-        Size => 6,
-        Name => 'RecipientGroups',
+        Data       => { $Self->{GroupObject}->GroupList( Valid => 1 ) },
+        Size       => 6,
+        Name       => 'RecipientGroups',
         Multiple   => 1,
         SelectedID => $Param{Data}->{RecipientGroups},
     );
     $Param{RecipientRolesStrg} = $Self->{LayoutObject}->BuildSelection(
-        Data => { $Self->{GroupObject}->RoleList( Valid => 1 ) },
-        Size => 6,
-        Name => 'RecipientRoles',
+        Data       => { $Self->{GroupObject}->RoleList( Valid => 1 ) },
+        Size       => 6,
+        Name       => 'RecipientRoles',
         Multiple   => 1,
         SelectedID => $Param{Data}->{RecipientRoles},
     );
@@ -416,54 +522,30 @@ sub _Edit {
         $EventClass .= ' ' . $Param{EventsServerError};
     }
 
-    # build dynamic field list
-    # get the dynamic fields for ticket object
-    my $DynamicFields = $Self->{DynamicFieldObject}->DynamicFieldList(
-        Valid      => 1,
-        ObjectType => ['Ticket'],
-        ResultType => 'HASH',
+    # Set class name for article type...
+    my $ArticleTypeIDClass = '';
+    if ( $Param{ArticleTypeIDServerError} ) {
+        $ArticleTypeIDClass .= ' ' . $Param{ArticleTypeIDServerError};
+    }
+
+    # Set class name for article sender type...
+    my $ArticleSenderTypeIDClass = '';
+    if ( $Param{ArticleSenderTypeIDServerError} ) {
+        $ArticleSenderTypeIDClass .= ' ' . $Param{ArticleSenderTypeIDServerError};
+    }
+
+    my %RegisteredEvents = $Self->{EventObject}->EventList(
+        ObjectTypes => [ 'Ticket', 'Article', ],
     );
-    my %DynamicFieldList =
-        map { 'TicketDynamicFieldUpdate_' . $_ => 'TicketDynamicFieldUpdate_' . $_ }
-        sort values %{$DynamicFields};
+
+    my @Events;
+    for my $ObjectType ( sort keys %RegisteredEvents ) {
+        push @Events, @{ $RegisteredEvents{$ObjectType} || [] };
+    }
 
     # Build the list...
     $Param{EventsStrg} = $Self->{LayoutObject}->BuildSelection(
-        Data => {
-            TicketStateUpdate                  => 'TicketStateUpdate',
-            TicketQueueUpdate                  => 'TicketQueueUpdate',
-            TicketCreate                       => 'TicketCreate',
-            TicketTitleUpdate                  => 'TicketTitleUpdate',
-            TicketTypeUpdate                   => 'TicketTypeUpdate',
-            TicketServiceUpdate                => 'TicketServiceUpdate',
-            TicketSLAUpdate                    => 'TicketSLAUpdate',
-            TicketUnlockTimeoutUpdate          => 'TicketUnlockTimeoutUpdate',
-            TicketCustomerUpdate               => 'TicketCustomerUpdate',
-            TicketPendingTimeUpdate            => 'TicketPendingTimeUpdate',
-            TicketLockUpdate                   => 'TicketLockUpdate',
-            TicketOwnerUpdate                  => 'TicketOwnerUpdate',
-            TicketResponsibleUpdate            => 'TicketResponsibleUpdate',
-            TicketPriorityUpdate               => 'TicketPriorityUpdate',
-            TicketSubscribe                    => 'TicketSubscribe',
-            TicketUnsubscribe                  => 'TicketUnsubscribe',
-            TicketAccountTime                  => 'TicketAccountTime',
-            TicketMerge                        => 'TicketMerge',
-            ArticleCreate                      => 'ArticleCreate',
-            ArticleSend                        => 'ArticleSend',
-            ArticleBounce                      => 'ArticleBounce',
-            EscalationResponseTimeNotifyBefore => 'EscalationResponseTimeNotifyBefore',
-            EscalationUpdateTimeNotifyBefore   => 'EscalationUpdateTimeNotifyBefore',
-            EscalationSolutionTimeNotifyBefore => 'EscalationSolutionTimeNotifyBefore',
-            EscalationResponseTimeStart        => 'EscalationResponseTimeStart',
-            EscalationUpdateTimeStart          => 'EscalationUpdateTimeStart',
-            EscalationSolutionTimeStart        => 'EscalationSolutionTimeStart',
-            EscalationResponseTimeStop         => 'EscalationResponseTimeStop',
-            EscalationUpdateTimeStop           => 'EscalationUpdateTimeStop',
-            EscalationSolutionTimeStop         => 'EscalationSolutionTimeStop',
-
-            # Special events for each DynamicField
-            %DynamicFieldList,
-        },
+        Data       => \@Events,
         Name       => 'Events',
         Multiple   => 1,
         Size       => 5,
@@ -489,6 +571,7 @@ sub _Edit {
         Size               => 5,
         Multiple           => 1,
         Name               => 'QueueID',
+        TreeView           => $TreeView,
         SelectedIDRefArray => $Param{Data}->{QueueID},
         OnChangeSubmit     => 0,
     );
@@ -543,7 +626,9 @@ sub _Edit {
 
     # build type string
     if ( $Self->{ConfigObject}->Get('Ticket::Type') ) {
-        my %Type = $Self->{TypeObject}->TypeList( UserID => $Self->{UserID}, );
+        my %Type = $Self->{TypeObject}->TypeList(
+            UserID => $Self->{UserID},
+        );
         $Param{TypesStrg} = $Self->{LayoutObject}->BuildSelection(
             Data        => \%Type,
             Name        => 'TypeID',
@@ -563,7 +648,11 @@ sub _Edit {
     if ( $Self->{ConfigObject}->Get('Ticket::Service') ) {
 
         # get list type
-        my %Service = $Self->{ServiceObject}->ServiceList( UserID => $Self->{UserID}, );
+        my %Service = $Self->{ServiceObject}->ServiceList(
+            Valid        => 1,
+            KeepChildren => 1,
+            UserID       => $Self->{UserID},
+        );
         $Param{ServicesStrg} = $Self->{LayoutObject}->BuildSelection(
             Data        => \%Service,
             Name        => 'ServiceID',
@@ -572,8 +661,11 @@ sub _Edit {
             Multiple    => 1,
             Translation => 0,
             Max         => 200,
+            TreeView    => $TreeView,
         );
-        my %SLA = $Self->{SLAObject}->SLAList( UserID => $Self->{UserID}, );
+        my %SLA = $Self->{SLAObject}->SLAList(
+            UserID => $Self->{UserID},
+        );
         $Param{SLAsStrg} = $Self->{LayoutObject}->BuildSelection(
             Data        => \%SLA,
             Name        => 'SLAID',
@@ -598,10 +690,13 @@ sub _Edit {
     for my $DynamicFieldConfig ( @{ $Self->{DynamicField} } ) {
         next DYNAMICFIELD if !IsHashRefWithData($DynamicFieldConfig);
 
-        # skip all dynamic fields where ObjectMatch is not yet implemented
-        next DYNAMICFIELD if !$Self->{BackendObject}->IsMatchable(
+        # skip all dynamic fields that are not designed to be notification triggers
+        my $IsNotificationEventCondition = $Self->{BackendObject}->HasBehavior(
             DynamicFieldConfig => $DynamicFieldConfig,
+            Behavior           => 'IsNotificationEventCondition',
         );
+
+        next DYNAMICFIELD if !$IsNotificationEventCondition;
 
         # get field html
         my $DynamicFieldHTML = $Self->{BackendObject}->SearchFieldRender(
@@ -629,10 +724,41 @@ sub _Edit {
         );
     }
 
+    # add rich text editor
+    if ( $Self->{RichText} ) {
+
+        # make sure body is rich text (if body is based on config)
+        if ( $Param{Type} && $Param{Type} =~ m{text\/plain}xmsi ) {
+            $Param{Body} = $Self->{LayoutObject}->Ascii2RichText(
+                String => $Param{Body},
+            );
+        }
+
+        # use height/width defined for this screen
+        $Param{RichTextHeight} = $Self->{Config}->{RichTextHeight} || 0;
+        $Param{RichTextWidth}  = $Self->{Config}->{RichTextWidth}  || 0;
+
+        $Self->{LayoutObject}->Block(
+            Name => 'RichText',
+            Data => \%Param,
+        );
+    }
+    else {
+
+        # reformat from html to plain
+        if ( $Param{Type} && $Param{Type} =~ m{text\/html}xmsi && $Param{Body} ) {
+
+            $Param{Body} = $Self->{LayoutObject}->RichText2Ascii(
+                String => $Param{Body},
+            );
+        }
+    }
+
     $Param{ArticleTypesStrg} = $Self->{LayoutObject}->BuildSelection(
-        Data => { $Self->{TicketObject}->ArticleTypeList( Result => 'HASH' ), },
-        Name => 'ArticleTypeID',
+        Data        => { $Self->{TicketObject}->ArticleTypeList( Result => 'HASH' ), },
+        Name        => 'ArticleTypeID',
         SelectedID  => $Param{Data}->{ArticleTypeID},
+        Class       => $ArticleTypeIDClass,
         Size        => 5,
         Multiple    => 1,
         Translation => 1,
@@ -640,15 +766,18 @@ sub _Edit {
     );
 
     $Param{ArticleSenderTypesStrg} = $Self->{LayoutObject}->BuildSelection(
-        Data => { $Self->{TicketObject}->ArticleSenderTypeList( Result => 'HASH' ), },
-        Name => 'ArticleSenderTypeID',
+        Data        => { $Self->{TicketObject}->ArticleSenderTypeList( Result => 'HASH' ), },
+        Name        => 'ArticleSenderTypeID',
         SelectedID  => $Param{Data}->{ArticleSenderTypeID},
+        Class       => $ArticleSenderTypeIDClass,
         Size        => 5,
         Multiple    => 1,
         Translation => 1,
         Max         => 200,
     );
-    my %GwList;
+
+
+  my %GwList;
     # COMPLEMENTO - Load list of Gateway Modules
     if ( ref $Self->{ConfigObject}->Get('SmsEvent::Gateway') eq 'HASH' ) {
         my %Gws = %{ $Self->{ConfigObject}->Get('SmsEvent::Gateway') };
@@ -666,15 +795,20 @@ sub _Edit {
         Max         => 200,
     );
 
-    # Display article types for article creation if sms is sent
-    # only use 'email-sms-*'-type articles
+
+    # Display article types for article creation if notification is sent
+    # only use 'email-notification-*'-type articles
+
     my %SmsArticleTypes = $Self->{TicketObject}->ArticleTypeList( Result => 'HASH' );
-#    for my $NotifArticleTypeID ( sort keys %SmsArticleTypes ) {
-#        if ( $SmsArticleTypes{$NotifArticleTypeID} !~ /^email-sms-/ ) {
-#            delete $SmsArticleTypes{$NotifArticleTypeID};
-#        }
-#    }
-    $Param{SmsArticleTypesStrg} = $Self->{LayoutObject}->BuildSelection(
+    for my $SmsArticleTypeID ( sort keys %SmsArticleTypes  ) {
+        if ( $SmsArticleTypes {$SmsArticleTypeID} !~ /sms/ ) {
+            delete $SmsArticleTypes{$SmsArticleTypeID};
+        }
+    }
+
+
+
+    $Param{NotificationArticleTypesStrg} = $Self->{LayoutObject}->BuildSelection(
         Data        => \%SmsArticleTypes,
         Name        => 'SmsArticleTypeID',
         Translation => 1,
@@ -682,10 +816,11 @@ sub _Edit {
     );
 
     # take over data fields
+    KEY:
     for my $Key (qw(RecipientEmail CustomerID CustomerUserID ArticleSubjectMatch ArticleBodyMatch))
     {
-        next if !$Param{Data}->{$Key};
-        next if !defined $Param{Data}->{$Key}->[0];
+        next KEY if !$Param{Data}->{$Key};
+        next KEY if !defined $Param{Data}->{$Key}->[0];
         $Param{$Key} = $Param{Data}->{$Key}->[0];
     }
 
@@ -709,14 +844,16 @@ sub _Overview {
     );
     my %List = $Self->{SmsEventObject}->SmsList();
 
-    # if there are any smss, they are shown
+    # if there are any notifications, they are shown
     if (%List) {
 
         # get valid list
         my %ValidList = $Self->{ValidObject}->ValidList();
         for ( sort { $List{$a} cmp $List{$b} } keys %List ) {
 
-            my %Data = $Self->{SmsEventObject}->SmsGet( ID => $_, );
+            my %Data = $Self->{SmsEventObject}->SmsGet(
+                ID => $_,
+            );
             $Self->{LayoutObject}->Block(
                 Name => 'OverviewResultRow',
                 Data => {
