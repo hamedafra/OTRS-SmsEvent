@@ -1,21 +1,19 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <otrs_package version="1.1">
     <Name>SmsEvent</Name>
-    <Version>4.0-0.0</Version>
+    <Version>5.0-0.0</Version>
     <Vendor>Hamed Afra</Vendor>
     <URL>http://rightel.ir/</URL>
     <License>GNU AFFERO GENERAL PUBLIC LICENSE Version 3, 2015</License>
     <Description Lang="en">This package allows you to Send SMS messages based on OTRS triggers like Ticket Creation, Article Creation, SLA Update, Priority change, Escalation etc. It already commes with MobilePronto gateway, but we can write for you new gateways :) Request a quote.</Description>
-    <Framework>4.x.x</Framework>
+    <Framework>5.0.x</Framework>
     <IntroInstall Lang="en" Title="Tutorial" Type="pre">        &lt;br/&gt;&lt;h1&gt;&lt;strong&gt;READ IT!!&lt;/strong&gt;&lt;/h1&gt;&lt;br/&gt;
-	Thanks for purchasing this package. You must agree with it's license available on our web site before continuing. 
+	Thanks for Using This Package. 
         &lt;br/&gt;
-        &lt;br/&gt;
-        &lt;strong&gt;Basicaly, you are not allowed to resell or distribute this package and you must have a license to use it.&lt;/strong&gt;&lt;br/&gt;
         &lt;br/&gt;
     </IntroInstall>
-    <BuildDate>2015-10-05 15:58:00</BuildDate>
-    <BuildHost>localhost</BuildHost>
+    <BuildDate>2016-09-05 12:00:00</BuildDate>
+    <BuildHost>OTRS.RIGHTEL.IR</BuildHost>
     <Filelist>
     	<File Location="Kernel/System/Sms/Gateways/Kannel.pm" Permission="644"></File>
         <File Location="Kernel/System/Sms/Gateways/MobilePronto.pm" Permission="644"></File>
@@ -28,7 +26,7 @@
         <File Location="Kernel/Config/Files/SmsEvent-Zenvia.xml" Permission="644"></File>
         <File Location="Kernel/System/Ticket/Event/SmsEvent.pm" Permission="644"></File>
         <File Location="Kernel/System/SmsEvent.pm" Permission="644"></File>
-        <File Location="Kernel/Output/HTML/Standard/AdminSmsEvent.tt" Permission="644"></File>
+        <File Location="Kernel/Output/HTML/Templates/Standard/AdminSmsEvent.tt" Permission="644"></File>
         <File Location="Kernel/Modules/AdminSmsEvent.pm" Permission="644"></File>
     </Filelist>
     <DatabaseInstall>
